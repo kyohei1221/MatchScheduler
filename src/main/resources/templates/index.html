@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<head>
+    <meta charset="UTF-8">
+    <title>スケジュール計算</title>
+    <link rel="stylesheet" href="style.css">
+    <script>
+        // 初期デフォルトのチーム順（リセット用）
+        const defaultTeamOrder = ["関大","関大","関大","関大","関大","関大"];
+        // 出力ボタンを無効化する関数
+        function disableOutputButton() {
+          var outputButton = document.getElementById("outputButton");
+          if (outputButton) outputButton.disabled = true;
+        }
+        // DOM読み込み完了後の初期化処理
+        document.addEventListener("DOMContentLoaded", function() {
+          initTabs();
+          updateTeamSelectOptions();
+          updateWeekInputs();
+          updateMiddleFixedSelectOptions();
+          updateFixedCardCheckboxes();
+          checkTotalCardCount();
+          disableOutputButton();
+          // フォーム全体の変更で出力ボタンを無効化（条件変更時は再計算が必要）
+          document.getElementById("schedulerForm").addEventListener("change", function() {
+            disableOutputButton();
+          });
+          // 週数変更時：週の入力欄・中間節固定選択肢を再生成
+          document.getElementById("numberOfWeeks").addEventListener("change", function() {
+              updateWeekInputs();
+              updateMiddleFixedSelectOptions();
+              checkTotalCardCount();
+          });
+          // 各チーム順位selectの変更イベント：重複を防止＆固定カード更新
+          var teamSelects = document.querySelectorAll(".teamSelect");
+          teamSelects.forEach(function(select) {
+              select.addEventListener("change", function() {
+                  updateTeamSelectOptions();
+                  updateFixedCardCheckboxes();
+              });
+          });
+          // 固定条件のチェックボックスのon/offでカード一覧表示の切替
+          document.getElementById("fixedWeek0Checkbox").addEventListener("change", function(){
+              updateFixedSectionLimits();
+              document.getElementById("fixedWeek0Cards").style.display = this.checked ? "block" : "none";
+          });
+          document.getElementById("fixedFinalCheckbox").addEventListener("change", function(){
+              updateFixedSectionLimits();
+              document.getElementById("fixedFinalCards").style.display = this.checked ? "block" : "none";
+          });
+          // 中間固定条件 3セットの表示切替
+          [1,2,3].forEach(function(i){
+              document.getElementById("fixedMidCheckbox" + i).addEventListener("change", function(){
+                  updateMiddleFixedSelectOptions();
+                  updateFixedSectionLimits();
+                  document.getElementById("fixedMidSection" + i).style.display = this.checked ? "block" : "none";
+              });
+              // 各中間固定の週選択が変更されたら更新
+              document.getElementById("fixedMidWeekIndex" + i).addEventListener("change", function(){
+                  updateMiddleFixedSelectOptions();
+                  updateFixedSectionLimits();
+              });
+          });
+          // 各週のカード枚数selectの変更は、合計チェックと固定上限更新を実施
+          var weekSelects = document.getElementsByName("weekMatchNumbers");
+          weekSelects.forEach(function(select) {
+              select.addEventListener("change", function() {
+                  checkTotalCardCount();
+                  updateFixedSectionLimits();
+              });
+          });
+          // ブックマークの初回読込（必要に応じて）
+          loadBookmarks();
+        });
+
+        function initTabs(){
+          const calcBtn = document.getElementById('tab-btn-calc');
+          const bmBtn = document.getElementById('tab-btn-bookmarks');
+          const calcPanel = document.getElementById('tab-calc');
+          const bmPanel = document.getElementById('tab-bookmarks');
+          function activate(which){
+            if (which==='calc'){
+              calcBtn.classList.add('active'); bmBtn.classList.remove('active');
+              calcPanel.classList.add('active'); bmPanel.classList.remove('active');
+            } else {
+              bmBtn.classList.add('active'); calcBtn.classList.remove('active');
+              bmPanel.classList.add('active'); calcPanel.classList.remove('active');
+            }
+          }
+          calcBtn.addEventListener('click', ()=>activate('calc'));
+          bmBtn.addEventListener('click', ()=>{ activate('bm'); loadBookmarks(); });
+          activate('calc');
+        }
+
+        // チーム順位selectの重複防止：他のselectで選択中の値をdisabledにする
+        function updateTeamSelectOptions() {
+            var selects = document.querySelectorAll(".teamSelect");
+            var selectedValues = Array.from(selects).map(select => select.value);
+            selects.forEach(function(select) {
+                Array.from(select.options).forEach(function(option) {
+                    option.disabled = selectedValues.includes(option.value) && option.value !== select.value;
+                });
+            });
+            // 固定カードの表示も更新
+            updateFixedCardCheckboxes();
+        }
+
+        // チーム順位リセット（初期値に戻す）
+        function resetTeamOrder() {
+            var selects = document.querySelectorAll(".teamSelect");
+            selects.forEach(function(select, index) {
+                select.value = defaultTeamOrder[index];
+            });
+            updateTeamSelectOptions();
+        }
+
+        // 週数に応じた「各節のカード枚数」入力欄をselectで動的に生成する
+        function updateWeekInputs() {
+            var weekInputsDiv = document.getElementById("weekInputs");
+            var numWeeks = parseInt(document.getElementById("numberOfWeeks").value);
+            weekInputsDiv.innerHTML = "";
+            for (var i = 0; i < numWeeks; i++) {
+                var label = document.createElement("label");
+                label.textContent = "第" + (i+1) + "節のカード数：";
+                var select = document.createElement("select");
+                select.name = "weekMatchNumbers";
+                // 選択肢：1カード, 2カード, 3カード
+                for (var j = 1; j <= 3; j++) {
+                    var option = document.createElement("option");
+                    option.value = j;
+                    option.text = j + "カード";
+					if(j === 2) option.selected = true;
+                    select.appendChild(option);
+                }
+                select.addEventListener("change", function() {
+                    checkTotalCardCount();
+                    updateFixedSectionLimits();
+                });
+                label.appendChild(select);
+                weekInputsDiv.appendChild(label);
+                weekInputsDiv.appendChild(document.createElement("br"));
+            }
+            // 合計表示エリア再生成
+            if (!document.getElementById("totalCardCountDiv")) {
+                var totalDiv = document.createElement("div");
+                totalDiv.id = "totalCardCountDiv";
+                weekInputsDiv.parentNode.insertBefore(totalDiv, weekInputsDiv.nextSibling);
+            }
+        }
+
+        // 合計カード数を計算し、15枚になるかチェック
+        function checkTotalCardCount() {
+            var selects = document.getElementsByName("weekMatchNumbers");
+            var total = 0;
+            selects.forEach(function(select) {
+                total += parseInt(select.value);
+            });
+            var totalDiv = document.getElementById("totalCardCountDiv");
+            if(total !== 15) {
+                totalDiv.style.color = "red";
+				totalDiv.innerText = "合計カード数は15になる必要があります。現在の合計：" + total;
+                document.getElementById("calculateButton").disabled = true;
+            } else {
+                totalDiv.style.color = "black";
+				totalDiv.innerText = "現在の合計：" + total;
+                document.getElementById("calculateButton").disabled = false;
+            }
+            updateFixedSectionLimits();
+        }
+
+        // 中間節固定の週選択肢（全体で利用する）の更新（各セットごとに更新）
+        function updateMiddleFixedSelectOptions() {
+            var numWeeks = parseInt(document.getElementById("numberOfWeeks").value);
+            // 有効な中間週は 2節目～(最終節-1) ＝ インデックス 1～(numWeeks-2)
+            var allowedWeeks = [];
+            for(var i = 1; i <= numWeeks - 2; i++){
+                allowedWeeks.push(i);
+            }
+            [1,2,3].forEach(function(i){
+                var select = document.getElementById("fixedMidWeekIndex" + i);
+                var currentValue = select.value;
+                select.innerHTML = "";
+                allowedWeeks.forEach(function(week){
+                    if(isMiddleWeekAlreadySelected(week, i)) return;
+                    var option = document.createElement("option");
+                    option.value = week;
+                    option.text = "第" + (parseInt(week)+1) + "節";
+                    select.appendChild(option);
+                });
+                if(select.options.length > 0){
+                    if(!Array.from(select.options).some(opt => opt.value === currentValue)){
+                        select.value = select.options[0].value;
+                    } else {
+                        select.value = currentValue;
+                    }
+                }
+            });
+        }
+        function isMiddleWeekAlreadySelected(week, currentSet) {
+            var selected = false;
+            [1,2,3].forEach(function(i){
+                if(i === currentSet) return;
+				var checkbox = document.getElementById("fixedMidCheckbox" + i);
+                var sel = document.getElementById("fixedMidWeekIndex" + i);
+                if(checkbox.checked && sel.value === String(week)){
+                    selected = true;
+                }
+            });
+            return selected;
+        }
+
+        // 固定カード一覧を生成（対戦カード名で表示、5カードごと改行）
+        function updateFixedCardCheckboxes() {
+            generateFixedCardCheckboxes("fixedWeek0CardList", "fixedMatchesWeek0");
+            generateFixedCardCheckboxes("fixedFinalCardList", "fixedMatchesFinal");
+            [1,2,3].forEach(function(i){
+                generateFixedCardCheckboxes("fixedMidCardList" + i, "fixedMatchesMid" + i);
+            });
+        }
+        function generateFixedCardCheckboxes(containerId, nameAttribute) {
+            var container = document.getElementById(containerId);
+            if (!container) return;
+            container.innerHTML = "";
+            for (var i = 0; i < 15; i++) {
+                var label = document.createElement("label");
+                var checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.name = nameAttribute;
+                checkbox.value = i;
+                checkbox.addEventListener("change", updateFixedSectionLimits);
+                label.appendChild(checkbox);
+                label.appendChild(document.createTextNode(" " + matchDetail(i) + " "));
+                container.appendChild(label);
+                if ((i+1) % 5 === 0) {
+                    container.appendChild(document.createElement("br"));
+                }
+            }
+        }
+		// 試合IDから対戦カードの詳細（現在のチーム順位に基づく）を生成
+		function matchDetail(matchId) {
+		  var matches = [
+		        [0,1], [0,2], [0,3], [0,4], [0,5],
+		        [1,2], [1,3], [1,4], [1,5],
+		        [2,3], [2,4], [2,5],
+		        [3,4], [3,5],
+		        [4,5]
+		    ];
+		    var teamNames = [];
+		    var selects = document.querySelectorAll(".teamSelect");
+		    selects.forEach(function(select) {
+		        teamNames.push(select.value);
+		    });
+		    if (teamNames.length < 6) {
+		        teamNames = defaultTeamOrder;
+		    }
+		    var m = matches[matchId];
+		    return teamNames[m[0]] + "−" + teamNames[m[1]];
+		}
+
+        // 固定カードのチェック数が上限に達したら未チェックのチェックボックスを無効化する
+        function enforceCheckboxLimit(containerId, limit) {
+            var container = document.getElementById(containerId);
+            if (!container) return;
+            var checkboxes = container.querySelectorAll("input[type='checkbox']");
+            var checkedCount = 0;
+            checkboxes.forEach(function(cb) {
+                if (cb.checked) checkedCount++;
+            });
+            checkboxes.forEach(function(cb) {
+                if (!cb.checked) {
+                    cb.disabled = (checkedCount >= limit);
+                } else {
+                    cb.disabled = false;
+                }
+            });
+        }
+        // 各固定セクションで、対応週のカード枚数を上限としてチェック制限を更新
+        function updateFixedSectionLimits() {
+            var weekSelects = document.getElementsByName("weekMatchNumbers");
+            // 第1節固定
+            if(document.getElementById("fixedWeek0Checkbox").checked){
+                var limit0 = parseInt(weekSelects[0].value);
+                enforceCheckboxLimit("fixedWeek0CardList", limit0);
+            }
+            // 最終節固定
+            if(document.getElementById("fixedFinalCheckbox").checked){
+                var limitFinal = parseInt(weekSelects[weekSelects.length - 1].value);
+                enforceCheckboxLimit("fixedFinalCardList", limitFinal);
+            }
+            // 中間固定各セット
+            [1,2,3].forEach(function(i){
+                var checkbox = document.getElementById("fixedMidCheckbox" + i);
+                if(checkbox && checkbox.checked){
+                    var sel = document.getElementById("fixedMidWeekIndex" + i);
+                    if(sel){
+                        var weekIndex = parseInt(sel.value);
+                        var limitMid = parseInt(weekSelects[weekIndex].value);
+                        enforceCheckboxLimit("fixedMidCardList" + i, limitMid);
+                    }
+                }
+            });
+        }
+		// 各固定セクションで、対応週のカード枚数を上限としてチェック制限を更新
+		function updateFixedSectionLimits() {
+		    var weekSelects = document.getElementsByName("weekMatchNumbers");
+		    // 第1節固定
+		    if(document.getElementById("fixedWeek0Checkbox").checked){
+		        var limit0 = parseInt(weekSelects[0].value);
+		        var container0 = document.getElementById("fixedWeek0CardList");
+		        var checkedCount0 = container0.querySelectorAll("input[type='checkbox']:checked").length;
+		        var remaining0 = limit0 - checkedCount0;
+		        // 動的な残り枚数を表示する（例：「残り：2枚」）
+		        var displayText0 = document.getElementById("fixedWeek0LimitText");
+				displayText0.innerText = "固定するカード（残り：" + remaining0 + "枚）:";
+		        enforceCheckboxLimit("fixedWeek0CardList", limit0);
+		    }
+			// 最終節固定
+			if(document.getElementById("fixedFinalCheckbox").checked){
+				var limitFinal = parseInt(weekSelects[weekSelects.length - 1].value);
+				var containerFinal = document.getElementById("fixedFinalCardList");
+				var checkedCountFinal = containerFinal.querySelectorAll("input[type='checkbox']:checked").length;
+				var remainingFinal = limitFinal - checkedCountFinal;
+				var displayTextF = document.getElementById("fixedFinalLimitText");
+				displayTextF.innerText = "固定できるカード（残り：" + remainingFinal + "枚まで）:";
+				enforceCheckboxLimit("fixedFinalCardList", limitFinal);
+			}
+			// 中間固定各セット
+			[1,2,3].forEach(function(i){
+				 var checkbox = document.getElementById("fixedMidCheckbox" + i);
+				 if(checkbox && checkbox.checked){
+					var sel = document.getElementById("fixedMidWeekIndex" + i);
+					if(sel){
+						 var weekIndex = parseInt(sel.value);
+						 var limitMid = parseInt(weekSelects[weekIndex].value);
+						 var containerMid = document.getElementById("fixedMidCardList" + i);
+				 	     var checkedCountMid = containerMid.querySelectorAll("input[type='checkbox']:checked").length;
+				 	     var remainingMid = limitMid - checkedCountMid;
+				 	     var displayTextM = document.getElementById("fixedMidLimitText" + i);
+				 	     displayTextM.innerText = "固定できるカード（残り：" + remainingMid + "枚まで）:";
+						 enforceCheckboxLimit("fixedMidCardList" + i, limitMid);
+					 }
+				 }
+			 });
+		}
+
+        // 「計算」ボタン押下時：AJAX送信してtotalCount取得
+        function calculateSchedule() {
+            var form = document.getElementById("schedulerForm");
+            var formData = new FormData(form);
+            fetch("/calculateAjax", {
+                method: "POST",
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) { throw new Error("固定するカードを選ぶか、「カード固定」のチェックを外してください。"); }
+                return response.json();
+            })
+            .then(data => {
+				document.getElementById("resultDiv").style.color = "black";
+                document.getElementById("resultDiv").innerText = "条件を満たすスケジュールは " + data.totalCount + " 件です。";
+				// totalCount が1000以上の場合は出力ボタンを無効化
+				var outputButton = document.getElementById("outputButton");
+			   	if(data.totalCount < 1000) {
+					outputButton.disabled = false;
+				} else {
+					outputButton.disabled = true;
+				}
+			 })
+            .catch(error => {
+                document.getElementById("resultDiv").innerText = error;
+				document.getElementById("resultDiv").style.color = "red";
+            });
+        }
+        // 「日程表を出力する」ボタン押下時：AJAXで日程表取得
+        function fetchSchedules() {
+            fetch("/schedulesAjax")
+            .then(response => {
+                if (!response.ok) { throw new Error("ネットワークエラー"); }
+                return response.json();
+            })
+            .then(data => {
+                var schedulesDiv = document.getElementById("schedulesDiv");
+                schedulesDiv.innerHTML = "";
+                data.schedules.forEach(function(schedule, index) {
+                    var scheduleDiv = document.createElement("div");
+                    var header = document.createElement("h3");
+                    header.innerText = "スケジュール " + (index + 1);
+                    scheduleDiv.appendChild(header);
+                    schedule.weekMatches.forEach(function(week, weekIndex) {
+                        var p = document.createElement("p");
+                        p.innerText = "第" + (weekIndex + 1) + "節：" + week.map(matchId => matchDetail(matchId)).join(", ");
+                        scheduleDiv.appendChild(p);
+                    });
+					
+					// ここから保存ボタンUI
+					var saveRow = document.createElement("div");
+					var btn = document.createElement("button");
+					btn.textContent = "この日程案を保存";
+					var statusSpan = document.createElement("span");
+					statusSpan.className = "save-status small muted";
+					statusSpan.style.marginLeft = "8px";
+					btn.addEventListener("click", async function(){
+					  btn.disabled = true;
+					  const setStatus = (text, cls) => {
+					      statusSpan.textContent = text;
+					      statusSpan.className = "save-status small " + cls; // "ok" or "err" or "muted"
+					    };
+					  const payload = {
+					    teamOrder: currentTeamOrder(),
+					    numberOfWeeks: parseInt(document.getElementById("numberOfWeeks").value),
+					    weekMatches: schedule.weekMatches
+					  };
+					  try {
+					    const res = await fetch("/bookmarks", {
+					      method: "POST",
+					      headers: {"Content-Type":"application/json"},
+					      body: JSON.stringify(payload)
+					    });
+						if (!res.ok) {
+						  if (res.status === 409) {
+						    setStatus("保存上限（20件）に達しています", "err");
+							btn.disabled = false;
+						  } else {
+						    setStatus("保存に失敗しました", "err");
+						  }
+						  return;
+						}
+					    const saved = await res.json();
+					    setStatus("保存しました (ID: " + saved.id + ")", "ok");
+					  } catch (e) {
+						setStatus("保存エラー: " + e.message, "err");
+						btn.disabled = false;
+					  }
+					});
+					saveRow.appendChild(btn);
+					saveRow.appendChild(statusSpan);
+					scheduleDiv.appendChild(saveRow);
+					
+                    scheduleDiv.appendChild(document.createElement("hr"));
+                    schedulesDiv.appendChild(scheduleDiv);
+                });
+            })
+            .catch(error => {
+                document.getElementById("schedulesDiv").innerText = "エラー: " + error;
+            });
+        }
+
+        function currentTeamOrder(){
+          return Array.from(document.querySelectorAll(".teamSelect")).map(s => s.value);
+        }
+
+        async function loadBookmarks(){
+          const list = document.getElementById("bookmarkList");
+          list.innerHTML = "<p class='muted'>読込中...</p>";
+          try{
+            const res = await fetch("/bookmarks");
+            if (!res.ok) throw new Error("取得に失敗しました");
+            const data = await res.json();
+            const bookmarks = Array.isArray(data) ? data : (data.items || []);
+            if (bookmarks.length === 0){ list.innerHTML = "<p class='muted'>ブックマークはありません。</p>"; return; }
+			bookmarks.sort((a, b) => Number(a.id) - Number(b.id));
+            list.innerHTML = "";
+            bookmarks.forEach(b => list.appendChild(renderBookmarkCard(b)));
+          }catch(e){
+            list.innerHTML = "<p class='err'>エラー: " + e.message + "</p>";
+          }
+        }
+
+        function renderBookmarkCard(bm){
+          const card = document.createElement("div"); card.className = "bookmark-card";
+          const h = document.createElement("div");
+          h.innerHTML = "<strong>保存ID:</strong> " + bm.id + " <span class='small'>（" + (bm.createdAt || "") + "）</span>";
+          card.appendChild(h);
+          try{
+            const data = (typeof bm.scheduleJson === "string") ? JSON.parse(bm.scheduleJson) : bm.scheduleJson;
+            // 表示
+            if (Array.isArray(data.weekMatches)){
+              data.weekMatches.forEach(function(week, idx){
+                const p = document.createElement("p");
+                const detail = week.map(mid => {
+                  const names = data.teamOrder || currentTeamOrder();
+                  const matches = [
+                    [0,1],[0,2],[0,3],[0,4],[0,5],
+                    [1,2],[1,3],[1,4],[1,5],
+                    [2,3],[2,4],[2,5],
+                    [3,4],[3,5],
+                    [4,5]
+                  ];
+                  const m = matches[mid]; return (names[m[0]] + "−" + names[m[1]]);
+                }).join(", ");
+                p.textContent = "第" + (idx+1) + "節：" + detail;
+                card.appendChild(p);
+              });
+            }
+          }catch(e){
+            const p = document.createElement("p"); p.className="err"; p.textContent = "表示エラー: " + e.message;
+            card.appendChild(p);
+          }
+
+          // メモ編集
+          const memoRow = document.createElement("div"); memoRow.className="row";
+          const memoLabel = document.createElement("label"); memoLabel.textContent = "メモ（50文字まで）:";
+          const memoInput = document.createElement("input"); memoInput.type="text"; memoInput.maxLength=50; memoInput.className="memo"; memoInput.value = bm.memo || "";
+          const saveBtn = document.createElement("button"); saveBtn.className="inline-btn"; saveBtn.textContent = "メモを保存";
+          const status = document.createElement("span"); status.className="small muted"; status.style.marginLeft="8px";
+          saveBtn.addEventListener("click", async function(){
+            const memo = memoInput.value || "";
+            if (memo.length > 50){ status.textContent = "50文字以内にしてください"; status.className="small err"; return; }
+            saveBtn.disabled = true;
+            try{
+              const res = await fetch("/bookmarks/" + bm.id + "/memo", {
+                method: "PATCH",
+                headers: {"Content-Type":"application/json"},
+                body: JSON.stringify({ memo })
+              });
+              if (!res.ok) throw new Error("保存に失敗");
+              status.textContent = "保存しました"; status.className="small ok";
+            }catch(e){
+              status.textContent = "エラー: " + e.message; status.className="small err";
+            }finally{
+              saveBtn.disabled = false;
+            }
+          });
+          memoRow.appendChild(memoLabel);
+          memoRow.appendChild(memoInput);
+          memoRow.appendChild(saveBtn);
+          memoRow.appendChild(status);
+          card.appendChild(memoRow);
+
+          // 削除ボタン
+          const delRow = document.createElement("div"); delRow.className="row";
+          const delBtn = document.createElement("button"); delBtn.className="inline-btn delete-btn"; delBtn.textContent = "削除";
+          const delStatus = document.createElement("span"); delStatus.className="small muted"; delStatus.style.marginLeft="8px";
+          delBtn.addEventListener("click", async function(){
+            if(!confirm("このブックマークを削除しますか？")) return;
+            delBtn.disabled = true;
+            try{
+              const res = await fetch("/bookmarks/" + bm.id, { method: "DELETE" });
+              if (!res.ok) throw new Error("削除に失敗");
+              card.remove();
+            }catch(e){
+              delStatus.textContent = "エラー: " + e.message; delStatus.className="small err";
+            }finally{
+              delBtn.disabled = false;
+            }
+          });
+          delRow.appendChild(delBtn);
+          delRow.appendChild(delStatus);
+          card.appendChild(delRow);
+
+          return card;
+        }
+    </script>
+</head>
+<body>
+  <h1>スケジュール計算</h1>
+
+  <div class="tabs">
+    <button id="tab-btn-calc" class="tab-btn">計算</button>
+    <button id="tab-btn-bookmarks" class="tab-btn">ブックマーク</button>
+  </div>
+
+  <!-- 計算タブ -->
+  <div id="tab-calc" class="tab-panel">
+    <form id="schedulerForm">
+      <p class="blue">
+        各チームの順位、今季の日程、各節に固定する試合などを選択して、その条件を満たす全ての日程表を出力するツールです。
+      </p>
+      <!-- 1. チーム順位（select＋リセット機能） -->
+      <h2>1. チーム順位</h2>
+      <p>各チームの順位（重複不可）：</p>
+      <div id="teamOrderDiv">
+        <div>
+          <label>1位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>2位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>3位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>4位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>5位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <div>
+          <label>6位：
+            <select name="teamOrder" class="teamSelect">
+              <option value="関大">関大</option>
+              <option value="関学">関学</option>
+              <option value="京大">京大</option>
+              <option value="近大">近大</option>
+              <option value="同大">同大</option>
+              <option value="立命">立命</option>
+            </select>
+          </label>
+        </div>
+        <br/>
+        <button type="button" onclick="resetTeamOrder()">チーム順位をリセットする</button>
+      </div>
+
+      <!-- 2. 週数・カード枚数 -->
+      <h2>2. 節数・各節のカード数</h2>
+      <div>
+        <label>節数 (6節,7節,8節)：
+          <select id="numberOfWeeks" name="numberOfWeeks">
+            <option value="6">6節</option>
+            <option value="7" selected>7節</option>
+            <option value="8">8節</option>
+          </select>
+        </label>
+      </div><br>
+      <div id="weekInputs"></div>
+        <!-- 選択された週数に応じたselect要素が生成 -->
+      <br/>
+
+      <!-- 3. 固定条件 -->
+      <h2>3. 固定条件</h2>
+      <p class="blue">
+        (1)1節のうちに、1チームの試合は必ず1カードまで（ダブルヘッダーは無し）<br>
+        (2)どのチームも2節以上間隔が空くことはない（例：あるチームが第1節に試合をし、第2節に試合がなければ、第3節には試合がある）<br>
+        (3)どのチームも最後の2節に必ず試合がある（例：7節の場合、第1〜第5節で終了するチームは無く、必ず第6節か第7節に試合がある）<br>
+        以下で設定する固定条件が何もない場合、この3つの条件は基本的に満たされています。
+      </p>
+      <p>
+        ※ただし、以下の固定条件次第で(2)は無いものとして日程を出力することが可能ですが、(1),(3)は無視できず、<br>
+        これらに違反する日程しかない場合、計算結果は0件になります。つまり、制約の強さは<br>
+        (1),(3)が最も強く、次いで以下の固定条件、最も弱いのが(2)ということになっています。<br>
+        （連続する2節の全てのカードをある4校のみで固定するなどによって(2)は無視できます。）
+      </p>
+      <p class="blue">
+        以下の固定の仕方は<br>
+        数試合固定してみる→計算→追加で固定する→再計算→出力→・・・<br>
+        というように徐々に条件を厳しくするようにしてください。いきなり頑張りすぎると少なくなります。
+      </p><br>
+      <p class="red">
+        固定するときの注意点です。<br>
+        ・第1節は全カード固定してください（不足していると0件になります）。他の節は、1カードだけでもOKです。<br>
+        ・1節のうちに、あるチームの試合が2カード以上あると、上記の(1)に違反して0件になります。<br>
+        ・同じカードが複数の節に固定されていても0件になります。
+      </p>
+      <!-- 第1節固定 -->
+      <div>
+        <label><input type="checkbox" id="fixedWeek0Checkbox" name="fixedWeek0" /> 第1節のカード固定</label>
+        <div id="fixedWeek0Cards" style="display:none;">
+          <p id="fixedWeek0LimitText" class="cardList"></p>
+          <div id="fixedWeek0CardList" class="cardList"></div>
+        </div>
+      </div><br>
+      <!-- 中間節固定：3セット -->
+      <!-- 固定条件1 -->
+      <div>
+        <label><input type="checkbox" id="fixedMidCheckbox1" name="fixedMid1" /> 中間節のカード固定1</label>
+        <div id="fixedMidSection1" style="display:none;" class="cardList">
+          <label>固定する節を選択（初節・最終節以外）：
+            <select id="fixedMidWeekIndex1" name="fixedMidWeekIndex1"></select>
+              <!-- 選択肢はJSで生成 -->
+          </label>
+          <p id="fixedMidLimitText1" class="cardList"></p>
+          <div id="fixedMidCardList1" class="cardList"></div>
+        </div>
+      </div><br>
+      <!-- 固定条件2 -->
+      <div>
+        <label><input type="checkbox" id="fixedMidCheckbox2" name="fixedMid2" /> 中間節のカード固定2</label>
+        <div id="fixedMidSection2" style="display:none;" class="cardList">
+          <label>固定する節を選択（初節・最終節以外）：
+            <select id="fixedMidWeekIndex2" name="fixedMidWeekIndex2"></select>
+          </label>
+          <p id="fixedMidLimitText2" class="cardList"></p>
+          <div id="fixedMidCardList2" class="cardList"></div>
+        </div>
+      </div><br>
+      <!-- 固定条件3 -->
+      <div>
+        <label><input type="checkbox" id="fixedMidCheckbox3" name="fixedMid3" /> 中間節のカード固定3</label>
+        <div id="fixedMidSection3" style="display:none;" class="cardList">
+          <label>固定する節を選択（初節・最終節以外）：
+            <select id="fixedMidWeekIndex3" name="fixedMidWeekIndex3"></select>
+          </label>
+          <p id="fixedMidLimitText3" class="cardList"></p>
+          <div id="fixedMidCardList3" class="cardList"></div>
+        </div>
+      </div><br/>
+      <!-- 最終節固定 -->
+      <div>
+        <label><input type="checkbox" id="fixedFinalCheckbox" name="fixedFinal" /> 最終節のカード固定</label>
+        <div id="fixedFinalCards" style="display:none;">
+          <p id="fixedFinalLimitText" class="cardList"></p>
+          <div id="fixedFinalCardList" class="cardList"></div>
+        </div>
+      </div><br>
+      <!-- 計算・日程表出力（AJAX） -->
+      <button type="button" id="calculateButton" onclick="calculateSchedule()">計算</button>
+      <button type="button" id="outputButton" onclick="fetchSchedules()">日程表を出力する</button>
+    </form>
+    <p class="blue">
+      日程表を出力できるのは計算結果が1000件未満の場合のみです。<br>
+      1000件以上の場合は固定するカード数を増やしてください。
+    </p>
+    <h2>結果</h2>
+    <div id="resultDiv"></div>
+    <p class="blue">初回の計算は時間がかかることがあります。</p>
+
+    <h2>日程表（保存できるのは最大20件までです。）</h2>
+    <div id="schedulesDiv"></div>
+  </div>
+
+  <!-- ブックマークタブ -->
+  <div id="tab-bookmarks" class="tab-panel">
+    <h2>ブックマーク一覧</h2>
+    <p class="small muted">保存した日程案のメモは50文字まで変更できます。</p>
+    <div id="bookmarkList"></div>
+  </div>
+</body>
+</html>
